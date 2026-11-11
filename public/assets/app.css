@@ -944,3 +944,11 @@ dialog.modal-task { width: min(820px, calc(100vw - 32px)); }
   .sections { scrollbar-width: none; }
   .sections::-webkit-scrollbar { display: none; }
 }
+
+/* ---------- ссылки на GitHub ---------- */
+a.icon-btn { color: var(--text-2); text-decoration: none; }
+a.icon-btn:hover { color: var(--text); text-decoration: none; }
+.auth-footer { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.auth-footer a { color: var(--muted); text-decoration: none; }
+.auth-footer a:hover { color: var(--accent); text-decoration: underline; }
+.auth-sep { opacity: 0.6; }

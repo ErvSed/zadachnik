@@ -4,6 +4,7 @@ import { api } from './api.js';
 import {
   h,
   icon,
+  githubIcon,
   clear,
   fmtDate,
   fmtDateTime,
@@ -16,6 +17,8 @@ import {
   truncate,
 } from './util.js';
 import { toast, openModal, confirmDialog } from './overlay.js';
+
+const REPO_URL = 'https://github.com/ErvSed/zadachnik';
 
 const state = {
   user: null,
@@ -96,7 +99,11 @@ function authLayout({ title, subtitle, form, note }) {
         form,
         note || null,
       ),
-      h('div', { class: 'auth-footer' }, `Сервер: ${location.host}`),
+      h('div', { class: 'auth-footer' },
+        h('span', {}, `Сервер: ${location.host}`),
+        h('span', { class: 'auth-sep' }, '·'),
+        h('a', { class: 'auth-link', href: REPO_URL, target: '_blank', rel: 'noopener' }, 'github.com/ErvSed/zadachnik'),
+      ),
     ),
   );
 }
@@ -292,6 +299,14 @@ function renderShell() {
         'aria-label': 'Сменить тему',
         onClick: (event) => toggleTheme(event.currentTarget),
       }, themeIcon()),
+      h('a', {
+        class: 'icon-btn',
+        href: REPO_URL,
+        target: '_blank',
+        rel: 'noopener',
+        title: 'Репозиторий на GitHub',
+        'aria-label': 'Репозиторий на GitHub',
+      }, githubIcon()),
       adminBtn,
       userChip,
       h('button', { class: 'icon-btn', type: 'button', title: 'Выйти', 'aria-label': 'Выйти', onClick: logout }, icon('logout')),
