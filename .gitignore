@@ -1,0 +1,9 @@
+# База данных и сессии — на сервере, в git не попадают
+data/
+test/.tmp-data/
+
+# Служебное
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

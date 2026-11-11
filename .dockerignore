@@ -1,0 +1,7 @@
+.git
+data
+test
+docs
+*.md
+*.log
+.DS_Store
