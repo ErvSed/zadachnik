@@ -744,16 +744,27 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const nets = os.networkInterfaces();
-  const addresses = [];
-  for (const list of Object.values(nets)) {
+  const skip = /vmware|virtualbox|vethernet|hyper-v|loopback|bluetooth|tailscale|zerotier|outline|wintun|wireguard|\btap\d*|\btun\d*/i;
+  const found = [];
+  for (const [name, list] of Object.entries(nets)) {
     for (const net of list || []) {
-      if (net.family === 'IPv4' && !net.internal) addresses.push(net.address);
+      if (net.family !== 'IPv4' || net.internal) continue;
+      if (skip.test(name)) continue;
+      found.push({ name, address: net.address });
     }
   }
+  const rank = (name) => (/wi-?fi|wireless|wlan|беспровод/i.test(name) ? 0 : /ethernet|локальная сеть|провод/i.test(name) ? 1 : 2);
+  found.sort((a, b) => rank(a.name) - rank(b.name));
+
   console.log('');
   console.log('  Задачник запущен');
   console.log(`  Локально:  http://localhost:${PORT}`);
-  for (const address of addresses) console.log(`  В сети:    http://${address}:${PORT}`);
+  if (found.length) {
+    console.log('  В сети:');
+    for (const item of found) console.log(`    http://${item.address}:${PORT}   ${item.name}`);
+  } else {
+    console.log('  В сети:    адрес не определён — проверьте подключение к сети');
+  }
   console.log(`  База:      ${DB_FILE}`);
   console.log('');
 });
