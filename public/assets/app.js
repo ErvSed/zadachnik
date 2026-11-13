@@ -473,13 +473,16 @@ function renderSectionHeader() {
   }
 
   const total = state.tasks.length;
-  const open = state.tasks.filter((t) => !t.done).length;
-  const review = state.tasks.filter((t) => t.done && !t.accepted).length;
+  const open = state.tasks.filter((t) => !(t.done && t.accepted) && !t.canceled).length;
+  const review = state.tasks.filter((t) => t.done && !t.accepted && !t.canceled).length;
   const overdue = state.tasks.filter(isOverdue).length;
   const parts = [`${total} ${plural(total, 'задача', 'задачи', 'задач')}`, `в работе ${open}`];
   if (review) parts.push(`на приёмке ${review}`);
   if (overdue) parts.push(`просрочено ${overdue}`);
   els.sectionSub.textContent = parts.join(' · ');
+  if (section.childCount) {
+    els.sectionSub.append(' ', h('span', { class: 'sub-note' }, 'включая подразделы'));
+  }
 
   const can = section.can || {};
   let accessNote = '';
@@ -591,9 +594,29 @@ function renderAddForm() {
 function refreshSectionCounts() {
   const section = currentSection();
   if (!section) return;
-  section.openCount = state.tasks.filter((t) => !t.done && !t.canceled).length;
+  section.openCount = state.tasks.filter((t) => !(t.done && t.accepted) && !t.canceled).length;
   section.taskCount = state.tasks.length;
   renderSections();
+  scheduleSectionsRefresh();
+}
+
+let sectionsRefreshTimer = null;
+
+function scheduleSectionsRefresh() {
+  if (sectionsRefreshTimer) clearTimeout(sectionsRefreshTimer);
+  sectionsRefreshTimer = setTimeout(refreshSections, 400);
+}
+
+async function refreshSections() {
+  sectionsRefreshTimer = null;
+  try {
+    const { sections } = await api.sections();
+    state.sections = sections;
+    renderSections();
+    renderSectionHeader();
+  } catch {
+    /* счётчики обновятся при следующем действии */
+  }
 }
 
 function renderSummary() {
@@ -749,6 +772,7 @@ function openSectionModal(section, { parentId = null } = {}) {
         close();
         renderSections();
         refreshSummary();
+        scheduleSectionsRefresh();
         await selectSection(created.id);
         toast(created.parentId ? 'Подраздел создан' : 'Раздел создан. Вы получили к нему полный доступ.', { tone: 'ok' });
       } else {
@@ -890,7 +914,7 @@ function isHot(task) {
 }
 
 function taskCounts() {
-  const counts = { all: 0, open: 0, review: 0, hot: 0, archive: 0, canceled: 0 };
+  const counts = { all: state.tasks.length, open: 0, review: 0, hot: 0, archive: 0, canceled: 0 };
   for (const task of state.tasks) {
     if (task.canceled) {
       counts.canceled += 1;
@@ -900,9 +924,8 @@ function taskCounts() {
       counts.archive += 1;
       continue;
     }
-    counts.all += 1;
-    if (!task.done) counts.open += 1;
-    else if (!task.accepted) counts.review += 1;
+    counts.open += 1;
+    if (task.done && !task.accepted) counts.review += 1;
     if (isHot(task)) counts.hot += 1;
   }
   return counts;
@@ -911,12 +934,11 @@ function taskCounts() {
 function visibleTasks() {
   const query = state.query.trim().toLowerCase();
   return state.tasks.filter((task) => {
-    if (state.filter === 'open' && (task.done || task.canceled)) return false;
+    if (state.filter === 'open' && (task.canceled || isArchived(task))) return false;
     if (state.filter === 'review' && !(task.done && !task.accepted && !task.canceled)) return false;
     if (state.filter === 'hot' && !isHot(task)) return false;
     if (state.filter === 'archive' && !isArchived(task)) return false;
     if (state.filter === 'canceled' && !task.canceled) return false;
-    if (state.filter === 'all' && (task.canceled || isArchived(task))) return false;
     if (query) {
       const haystack = [task.title, task.assigneeName || '', ...(task.comments || []).map((c) => c.text)].join(' ').toLowerCase();
       if (!haystack.includes(query)) return false;
@@ -1034,6 +1056,13 @@ function taskRow(task, editable) {
   const meta = [];
   if (task.canceled) meta.push(h('span', { class: 'badge-canceled' }, icon('xCircle'), 'отменена'));
   if (hot) meta.push(h('span', { class: 'badge-hot' }, icon('flame'), 'горит'));
+  if (task.done && !task.accepted && !task.canceled) {
+    meta.push(h('span', { class: 'badge-review' }, 'на приёмке'));
+  }
+  const taskSection = state.sections.find((s) => s.id === task.sectionId);
+  if (taskSection && task.sectionId !== state.currentSectionId) {
+    meta.push(h('span', { class: 'badge-sub', title: 'Подраздел: ' + taskSection.name }, taskSection.name));
+  }
   if (task.dueDate) {
     meta.push(h('span', { class: 'task-due' + (overdue ? ' is-overdue' : '') + (task.done ? ' is-muted' : '') },
       icon('calendar'), dueLabel(task.dueDate)));

@@ -1109,3 +1109,30 @@ a.icon-btn:hover { color: var(--text); text-decoration: none; }
   .topbar .admin-btn { width: 34px; padding: 0; }
   .topbar .admin-btn .btn-label { display: none; }
 }
+
+/* отметки «на приёмке» и подраздел в строке задачи */
+.badge-review {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+.badge-sub {
+  display: inline-flex;
+  align-items: center;
+  max-width: 180px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-note { color: var(--muted); font-size: 11.5px; }

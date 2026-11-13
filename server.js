@@ -418,10 +418,11 @@ async function handleApi(req, res, url) {
     if (!section) return fail(res, 404, 'Раздел не найден');
     const perms = permsFor(user, section.id);
     if (!perms.read && !perms.create && !perms.edit) return fail(res, 403, 'Нет доступа к разделу');
+    const ids = accessibleSectionIds(user, section.id);
     const tasks = db.tasks
-      .filter((t) => t.sectionId === section.id)
+      .filter((t) => ids.has(t.sectionId))
       .sort(compareTasks);
-    return sendJson(res, 200, { tasks });
+    return sendJson(res, 200, { tasks, sectionIds: [...ids] });
   }
 
   if (route[0] === 'sections' && route.length === 3 && route[2] === 'tasks' && method === 'POST') {
@@ -802,6 +803,23 @@ function descendantSectionIds(sectionId) {
   return ids;
 }
 
+/** Раздел и его подразделы, доступные пользователю (для показа задач верхнего уровня). */
+function accessibleSectionIds(user, rootId) {
+  const ids = new Set([rootId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const section of db.sections) {
+      if (!section.parentId || !ids.has(section.parentId) || ids.has(section.id)) continue;
+      if (user.role === 'admin' || permsFor(user, section.id).read || permsFor(user, section.id).edit || permsFor(user, section.id).create) {
+        ids.add(section.id);
+        added = true;
+      }
+    }
+  }
+  return ids;
+}
+
 /** После «выполнено + принято» создаёт следующую задачу серии. */
 function maybeSpawnNext(task) {
   if (!task.recurrence || task.spawnedNext) return null;
@@ -841,7 +859,8 @@ function maybeSpawnNext(task) {
 
 function sectionForClient(user, section) {
   const perms = permsFor(user, section.id);
-  const tasks = db.tasks.filter((t) => t.sectionId === section.id);
+  const ids = accessibleSectionIds(user, section.id);
+  const tasks = db.tasks.filter((t) => ids.has(t.sectionId));
   return {
     id: section.id,
     name: section.name,
@@ -850,7 +869,8 @@ function sectionForClient(user, section) {
     createdAt: section.createdAt,
     can: perms,
     taskCount: tasks.length,
-    openCount: tasks.filter((t) => !t.done && !t.canceled).length,
+    openCount: tasks.filter((t) => !(t.done && t.accepted) && !t.canceled).length,
+    childCount: db.sections.filter((s) => s.parentId === section.id).length,
   };
 }
 

@@ -133,6 +133,15 @@ async function main() {
     check('повторение сохранено', t3.json.task.recurrence && t3.json.task.recurrence.freq === 'weekly');
     const taskC = t3.json.task;
 
+    const parentTasks = await admin(`/api/sections/${sectionB}/tasks`);
+    check('задачи подраздела видны в родительском разделе', parentTasks.json.tasks.length === 2);
+    check('в ответе список разделов ветки', parentTasks.json.sectionIds.includes(subB));
+
+    const sectionsWithCounts = await admin('/api/sections');
+    const parentSection = sectionsWithCounts.json.sections.find((s) => s.id === sectionB);
+    check('счётчик родителя включает подраздел', parentSection.openCount === 2);
+    check('у родителя отмечены подразделы', parentSection.childCount === 1);
+
     const patched = await admin(`/api/tasks/${taskA.id}`, { method: 'PATCH', body: { done: true } });
     check('отметка «Выполнено» сохраняется', patched.json.task.done === true && patched.json.task.doneBy === 'Администратор');
 
@@ -209,6 +218,9 @@ async function main() {
 
     const usersForbidden = await petrov('/api/users');
     check('пользователь не видит админку', usersForbidden.status === 403);
+
+    const parentForbidden = await petrov(`/api/sections/${sectionB}/tasks`);
+    check('чужой родительский раздел закрыт', parentForbidden.status === 403);
 
     const summaryForPetrov = await petrov('/api/summary');
     check('сводка пользователя только по его разделам', summaryForPetrov.status === 200 && summaryForPetrov.json.sections.length === 2);
