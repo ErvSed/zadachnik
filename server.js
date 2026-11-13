@@ -715,9 +715,8 @@ async function handleApi(req, res, url) {
 }
 
 function taskRank(task) {
-  if (task.canceled) return 3;
-  if (task.done && task.accepted) return 2;
-  if (task.done) return 1;
+  if (task.canceled) return 2;
+  if (task.done && task.accepted) return 1;
   return 0;
 }
 
