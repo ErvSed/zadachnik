@@ -490,6 +490,14 @@ async function handleApi(req, res, url) {
         task.acceptedAt = task.accepted ? new Date().toISOString() : null;
         task.acceptedBy = task.accepted ? user.name : null;
       }
+      if (body.sectionId !== undefined) {
+        const target = sectionById(body.sectionId);
+        if (!target) return fail(res, 404, 'Раздел не найден');
+        if (target.id !== task.sectionId) {
+          if (!permsFor(user, target.id).edit) return fail(res, 403, 'Нет права редактировать задачи в выбранном разделе');
+          task.sectionId = target.id;
+        }
+      }
       if (body.assigneeId !== undefined) {
         const assignee = resolveAssignee(body.assigneeId);
         task.assigneeId = assignee ? assignee.id : null;

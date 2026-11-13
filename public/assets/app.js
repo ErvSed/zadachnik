@@ -1171,6 +1171,15 @@ function openTaskModal(task) {
     state.directory.map((user) => h('option', { value: user.id, selected: user.id === task.assigneeId }, user.name)),
   );
 
+  const sectionSelect = h('select', { class: 'input', disabled: !canEdit || locked, 'aria-label': 'Раздел' },
+    sectionOptions()
+      .filter(({ section: item }) => state.user.role === 'admin' || (item.can && item.can.edit))
+      .map(({ section: item, depth }) => h('option', {
+        value: item.id,
+        selected: item.id === task.sectionId,
+      }, `${'— '.repeat(depth)}${item.name}`)),
+  );
+
   const repeatSelect = h('select', { class: 'input', disabled: !canEdit || locked, 'aria-label': 'Повторение' },
     h('option', { value: '', selected: !task.recurrence }, 'Не повторять'),
     h('option', { value: 'daily', selected: Boolean(task.recurrence && task.recurrence.freq === 'daily') }, 'Каждый день'),
@@ -1302,14 +1311,26 @@ function openTaskModal(task) {
       const recurrence = repeatSelect.value
         ? { freq: repeatSelect.value, interval: Math.max(1, Math.min(12, Number(intervalInput.value) || 1)) }
         : null;
+      const previousSectionId = task.sectionId;
       const payload = {
         title,
         dueDate: dueInput.value || '',
         assigneeId: assigneeSelect.value || null,
         recurrence,
+        sectionId: sectionSelect.value || task.sectionId,
       };
       const { task: updated, spawned } = await api.updateTask(task.id, payload);
+      const moved = updated.sectionId !== previousSectionId;
       Object.assign(task, updated);
+      if (moved) {
+        close();
+        await loadTasks();
+        refreshSummary();
+        scheduleSectionsRefresh();
+        const targetName = (state.sections.find((s) => s.id === updated.sectionId) || {}).name || 'раздел';
+        toast(`Задача перемещена в «${targetName}»`, { tone: 'ok' });
+        return;
+      }
       afterChange(spawned);
       close();
       toast('Задача сохранена', { tone: 'ok', duration: 2000 });
@@ -1436,6 +1457,7 @@ function openTaskModal(task) {
         ),
         h('label', { class: 'field' }, h('span', {}, 'Дата исполнения'), dueInput),
         h('label', { class: 'field' }, h('span', {}, 'Ответственный'), assigneeSelect),
+        h('label', { class: 'field' }, h('span', {}, 'Раздел'), sectionSelect),
         h('div', { class: 'form-row' },
           h('label', { class: 'field' }, h('span', {}, 'Повторение'), repeatSelect),
           intervalField,

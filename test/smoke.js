@@ -166,6 +166,15 @@ async function main() {
     const restored = await admin(`/api/tasks/${t4.json.task.id}`, { method: 'PATCH', body: { canceled: false } });
     check('задачу можно вернуть', restored.json.task.canceled === false);
 
+    console.log('\nПеремещение задачи');
+    const movable = await admin(`/api/sections/${sectionA}/tasks`, { method: 'POST', body: { title: 'Перемещаемая задача' } });
+    const moved = await admin(`/api/tasks/${movable.json.task.id}`, { method: 'PATCH', body: { sectionId: subB } });
+    check('задача перемещена в подраздел', moved.status === 200 && moved.json.task.sectionId === subB);
+    const fromA = await admin(`/api/sections/${sectionA}/tasks`);
+    check('в исходном разделе задачи нет', !fromA.json.tasks.some((t) => t.id === movable.json.task.id));
+    const inSub = await admin(`/api/sections/${subB}/tasks`);
+    check('в подразделе задача есть', inSub.json.tasks.some((t) => t.id === movable.json.task.id));
+
     console.log('\nСводка');
     const summary = await admin('/api/summary');
     check('сводка отдаётся', summary.status === 200 && summary.json.totals.total > 0);
@@ -221,6 +230,9 @@ async function main() {
 
     const parentForbidden = await petrov(`/api/sections/${sectionB}/tasks`);
     check('чужой родительский раздел закрыт', parentForbidden.status === 403);
+
+    const moveForbidden = await petrov(`/api/tasks/${taskC.id}`, { method: 'PATCH', body: { sectionId: sectionA } });
+    check('перемещение без прав на целевой раздел запрещено', moveForbidden.status === 403);
 
     const summaryForPetrov = await petrov('/api/summary');
     check('сводка пользователя только по его разделам', summaryForPetrov.status === 200 && summaryForPetrov.json.sections.length === 2);
