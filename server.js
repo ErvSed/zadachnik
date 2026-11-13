@@ -37,7 +37,7 @@ const MIME = {
    База
    ========================================================= */
 function emptyDb() {
-  return { version: 1, users: [], sections: [], permissions: [], tasks: [], sessions: [] };
+  return { schema: 2, users: [], sections: [], permissions: [], tasks: [], sessions: [] };
 }
 
 function normalizeDb(raw) {
@@ -46,10 +46,39 @@ function normalizeDb(raw) {
   for (const key of Object.keys(db)) {
     if (Array.isArray(raw[key])) db[key] = raw[key];
   }
+  db.schema = Number(raw.schema) || 2;
   return db;
 }
 
+/** Приводит старую базу к актуальной схеме, не теряя данные. */
+function migrate(db) {
+  let changed = false;
+  for (const section of db.sections) {
+    if (section.parentId === undefined) {
+      section.parentId = null;
+      changed = true;
+    }
+  }
+  for (const task of db.tasks) {
+    if (task.canceled === undefined) { task.canceled = false; changed = true; }
+    if (task.canceledAt === undefined) { task.canceledAt = null; changed = true; }
+    if (task.canceledBy === undefined) { task.canceledBy = null; changed = true; }
+    if (task.cancelReason === undefined) { task.cancelReason = ''; changed = true; }
+    if (task.assigneeId === undefined) { task.assigneeId = null; changed = true; }
+    if (task.assigneeName === undefined) { task.assigneeName = ''; changed = true; }
+    if (task.recurrence === undefined) { task.recurrence = null; changed = true; }
+    if (task.spawnedNext === undefined) { task.spawnedNext = false; changed = true; }
+    if (task.seriesId === undefined) { task.seriesId = null; changed = true; }
+  }
+  if (db.schema !== 2) {
+    db.schema = 2;
+    changed = true;
+  }
+  return changed;
+}
+
 let db = loadDb();
+if (migrate(db)) saveDb();
 
 function loadDb() {
   try {
@@ -341,17 +370,22 @@ async function handleApi(req, res, url) {
   if (route[0] === 'sections' && route.length === 1 && method === 'POST') {
     const body = await readJsonBody(req);
     const name = textValue(body.name, { min: 1, max: 120, field: 'Название раздела' });
+    let parentId = null;
+    if (body.parentId) {
+      const parent = sectionById(body.parentId);
+      if (!parent) return fail(res, 404, 'Родительский раздел не найден');
+      if (!permsFor(user, parent.id).edit) return fail(res, 403, 'Нет права создавать подраздел в этом разделе');
+      parentId = parent.id;
+    }
     const section = {
       id: newId('s'),
       name,
+      parentId,
       createdBy: user.id,
       createdAt: new Date().toISOString(),
     };
     db.sections.push(section);
     db.permissions.push({ userId: user.id, sectionId: section.id, ...FULL });
-    if (user.role === 'admin') {
-      // админ и так видит всё
-    }
     saveDb();
     return sendJson(res, 201, { section: sectionForClient(user, section) });
   }
@@ -370,11 +404,12 @@ async function handleApi(req, res, url) {
     const section = sectionById(route[1]);
     if (!section) return fail(res, 404, 'Раздел не найден');
     if (user.role !== 'admin') return fail(res, 403, 'Удалять разделы может администратор');
-    db.sections = db.sections.filter((s) => s.id !== section.id);
-    db.permissions = db.permissions.filter((p) => p.sectionId !== section.id);
-    db.tasks = db.tasks.filter((t) => t.sectionId !== section.id);
+    const ids = descendantSectionIds(section.id);
+    db.sections = db.sections.filter((s) => !ids.has(s.id));
+    db.permissions = db.permissions.filter((p) => !ids.has(p.sectionId));
+    db.tasks = db.tasks.filter((t) => !ids.has(t.sectionId));
     saveDb();
-    return sendJson(res, 200, { ok: true });
+    return sendJson(res, 200, { ok: true, removed: [...ids] });
   }
 
   /* --- задачи --- */
@@ -396,6 +431,8 @@ async function handleApi(req, res, url) {
     const body = await readJsonBody(req);
     const title = textValue(body.title, { min: 1, max: 300, field: 'Задача' });
     const dueDate = dateValue(body.dueDate);
+    const assignee = resolveAssignee(body.assigneeId);
+    const recurrence = parseRecurrence(body.recurrence);
     const now = new Date().toISOString();
     const task = {
       id: newId('t'),
@@ -404,10 +441,19 @@ async function handleApi(req, res, url) {
       dueDate,
       done: false,
       accepted: false,
+      canceled: false,
+      canceledAt: null,
+      canceledBy: null,
+      cancelReason: '',
       doneAt: null,
       doneBy: null,
       acceptedAt: null,
       acceptedBy: null,
+      assigneeId: assignee ? assignee.id : null,
+      assigneeName: assignee ? assignee.name : '',
+      recurrence,
+      spawnedNext: false,
+      seriesId: recurrence ? newId('ser') : null,
       comments: [],
       createdBy: user.id,
       createdByName: user.name,
@@ -443,9 +489,26 @@ async function handleApi(req, res, url) {
         task.acceptedAt = task.accepted ? new Date().toISOString() : null;
         task.acceptedBy = task.accepted ? user.name : null;
       }
+      if (body.assigneeId !== undefined) {
+        const assignee = resolveAssignee(body.assigneeId);
+        task.assigneeId = assignee ? assignee.id : null;
+        task.assigneeName = assignee ? assignee.name : '';
+      }
+      if (body.recurrence !== undefined) {
+        task.recurrence = parseRecurrence(body.recurrence);
+        if (!task.recurrence) task.spawnedNext = false;
+        if (task.recurrence && !task.seriesId) task.seriesId = newId('ser');
+      }
+      if (body.canceled !== undefined) {
+        task.canceled = Boolean(body.canceled);
+        task.canceledAt = task.canceled ? new Date().toISOString() : null;
+        task.canceledBy = task.canceled ? user.name : null;
+        task.cancelReason = task.canceled ? String(body.cancelReason || '').slice(0, 300) : '';
+      }
       task.updatedAt = new Date().toISOString();
+      const spawned = maybeSpawnNext(task);
       saveDb();
-      return sendJson(res, 200, { task });
+      return sendJson(res, 200, { task, spawned });
     }
 
     if (method === 'DELETE') {
@@ -486,6 +549,47 @@ async function handleApi(req, res, url) {
     task.updatedAt = new Date().toISOString();
     saveDb();
     return sendJson(res, 200, { ok: true });
+  }
+
+  /* --- сводка по всем разделам --- */
+  if (route[0] === 'summary' && method === 'GET') {
+    const sections = visibleSections(user);
+    const stats = new Map();
+    for (const section of sections) {
+      stats.set(section.id, { total: 0, open: 0, review: 0, archive: 0, canceled: 0, overdue: 0, hot: 0 });
+    }
+    for (const task of db.tasks) {
+      const st = stats.get(task.sectionId);
+      if (!st) continue;
+      st.total += 1;
+      if (task.canceled) {
+        st.canceled += 1;
+      } else if (task.done && task.accepted) {
+        st.archive += 1;
+      } else if (task.done) {
+        st.review += 1;
+      } else {
+        st.open += 1;
+        if (isOverdueTask(task)) st.overdue += 1;
+        if (isHotTask(task)) st.hot += 1;
+      }
+    }
+    const totals = { total: 0, open: 0, review: 0, archive: 0, canceled: 0, overdue: 0, hot: 0 };
+    const list = sections.map((section) => {
+      const counts = stats.get(section.id);
+      for (const key of Object.keys(totals)) totals[key] += counts[key];
+      return { id: section.id, name: section.name, parentId: section.parentId || null, counts };
+    });
+    return sendJson(res, 200, { sections: list, totals });
+  }
+
+  /* --- справочник пользователей для выбора ответственного --- */
+  if (route[0] === 'users' && route[1] === 'directory' && method === 'GET') {
+    const list = db.users
+      .filter((u) => !u.disabled)
+      .map((u) => ({ id: u.id, name: u.name }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    return sendJson(res, 200, { users: list });
   }
 
   /* --- пользователи (админ) --- */
@@ -601,12 +705,138 @@ async function handleApi(req, res, url) {
   return fail(res, 404, 'Метод не найден');
 }
 
+function taskRank(task) {
+  if (task.canceled) return 3;
+  if (task.done && task.accepted) return 2;
+  if (task.done) return 1;
+  return 0;
+}
+
 function compareTasks(a, b) {
-  if (a.done !== b.done) return a.done ? 1 : -1;
+  const ra = taskRank(a);
+  const rb = taskRank(b);
+  if (ra !== rb) return ra - rb;
   const ad = a.dueDate || '9999-12-31';
   const bd = b.dueDate || '9999-12-31';
   if (ad !== bd) return ad < bd ? -1 : 1;
   return a.createdAt < b.createdAt ? 1 : -1;
+}
+
+function isoDate(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function parseIsoDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function daysLeft(dateStr) {
+  const d = parseIsoDate(dateStr);
+  if (!d) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((d.getTime() - today.getTime()) / 86400000);
+}
+
+function isOverdueTask(task) {
+  if (!task || task.done || task.canceled || !task.dueDate) return false;
+  const diff = daysLeft(task.dueDate);
+  return diff !== null && diff < 0;
+}
+
+function isHotTask(task) {
+  if (!task || task.done || task.canceled || !task.dueDate) return false;
+  const diff = daysLeft(task.dueDate);
+  return diff !== null && diff <= 2;
+}
+
+function addPeriod(dateStr, recurrence) {
+  const base = parseIsoDate(dateStr) || new Date();
+  const interval = Math.max(1, Math.min(12, Number(recurrence.interval) || 1));
+  if (recurrence.freq === 'daily') {
+    base.setDate(base.getDate() + interval);
+  } else if (recurrence.freq === 'weekly') {
+    base.setDate(base.getDate() + 7 * interval);
+  } else {
+    const day = base.getDate();
+    base.setDate(1);
+    base.setMonth(base.getMonth() + interval);
+    const lastDay = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    base.setDate(Math.min(day, lastDay));
+  }
+  return isoDate(base);
+}
+
+function parseRecurrence(value) {
+  if (!value) return null;
+  const freq = value.freq;
+  if (!['daily', 'weekly', 'monthly'].includes(freq)) {
+    throw Object.assign(new Error('Некорректный период повторения'), { status: 400 });
+  }
+  return { freq, interval: Math.max(1, Math.min(12, Number(value.interval) || 1)) };
+}
+
+function resolveAssignee(value) {
+  if (!value) return null;
+  const user = db.users.find((u) => u.id === value && !u.disabled);
+  if (!user) throw Object.assign(new Error('Ответственный не найден'), { status: 400 });
+  return { id: user.id, name: user.name };
+}
+
+function descendantSectionIds(sectionId) {
+  const ids = new Set([sectionId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const section of db.sections) {
+      if (section.parentId && ids.has(section.parentId) && !ids.has(section.id)) {
+        ids.add(section.id);
+        added = true;
+      }
+    }
+  }
+  return ids;
+}
+
+/** После «выполнено + принято» создаёт следующую задачу серии. */
+function maybeSpawnNext(task) {
+  if (!task.recurrence || task.spawnedNext) return null;
+  if (!task.done || !task.accepted || task.canceled) return null;
+  const now = new Date().toISOString();
+  const next = {
+    id: newId('t'),
+    sectionId: task.sectionId,
+    title: task.title,
+    dueDate: addPeriod(task.dueDate, task.recurrence),
+    done: false,
+    accepted: false,
+    canceled: false,
+    canceledAt: null,
+    canceledBy: null,
+    cancelReason: '',
+    doneAt: null,
+    doneBy: null,
+    acceptedAt: null,
+    acceptedBy: null,
+    assigneeId: task.assigneeId || null,
+    assigneeName: task.assigneeName || '',
+    recurrence: { ...task.recurrence },
+    spawnedNext: false,
+    seriesId: task.seriesId || newId('ser'),
+    comments: [],
+    createdBy: task.createdBy,
+    createdByName: task.createdByName,
+    createdAt: now,
+    updatedAt: now,
+  };
+  task.seriesId = next.seriesId;
+  task.spawnedNext = true;
+  db.tasks.push(next);
+  return next;
 }
 
 function sectionForClient(user, section) {
@@ -615,11 +845,12 @@ function sectionForClient(user, section) {
   return {
     id: section.id,
     name: section.name,
+    parentId: section.parentId || null,
     createdBy: section.createdBy,
     createdAt: section.createdAt,
     can: perms,
     taskCount: tasks.length,
-    openCount: tasks.filter((t) => !t.done).length,
+    openCount: tasks.filter((t) => !t.done && !t.canceled).length,
   };
 }
 

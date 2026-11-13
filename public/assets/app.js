@@ -11,6 +11,7 @@ import {
   relTime,
   dueLabel,
   isOverdue,
+  dayDiff,
   initials,
   colorFor,
   debounce,
@@ -31,6 +32,8 @@ const state = {
   query: '',
   view: 'tasks',
   admin: null,
+  summary: null,
+  directory: [],
 };
 
 const els = {};
@@ -40,9 +43,10 @@ const THEME_LABEL = { auto: 'как в системе', light: 'светлая',
 const FILTERS = [
   { key: 'open', label: 'В работе' },
   { key: 'review', label: 'На приёмке' },
-  { key: 'done', label: 'Готово' },
+  { key: 'hot', label: 'Горящие' },
+  { key: 'archive', label: 'Архив' },
+  { key: 'canceled', label: 'Отменённые' },
   { key: 'all', label: 'Все' },
-  { key: 'overdue', label: 'Просрочено' },
 ];
 
 try {
@@ -64,6 +68,7 @@ async function boot() {
     if (!me.user) return renderLogin();
     applySession(me);
     renderShell();
+    loadGlobalData();
     const hashId = decodeURIComponent(location.hash.replace(/^#/, ''));
     const initial = state.sections.some((s) => s.id === hashId) ? hashId : state.sections[0] && state.sections[0].id;
     if (initial) await selectSection(initial, { skipHash: true });
@@ -76,6 +81,29 @@ async function boot() {
 function applySession(payload) {
   state.user = payload.user;
   state.sections = payload.sections || [];
+}
+
+async function loadDirectory() {
+  try {
+    const { users } = await api.directory();
+    state.directory = users;
+  } catch {
+    state.directory = [];
+  }
+}
+
+async function refreshSummary() {
+  try {
+    state.summary = await api.summary();
+  } catch {
+    state.summary = null;
+  }
+  renderSummary();
+}
+
+function loadGlobalData() {
+  refreshSummary();
+  loadDirectory().then(() => renderAddForm());
 }
 
 /* =========================================================
@@ -135,6 +163,7 @@ function renderLogin(message = '') {
         const payload = await api.login({ login: login.value.trim(), password: password.value });
         applySession(payload);
         renderShell();
+        loadGlobalData();
         if (state.sections[0]) await selectSection(state.sections[0].id, { skipHash: true });
         else renderNoSections();
       } catch (error) {
@@ -183,6 +212,7 @@ function renderSetup() {
         });
         applySession(payload);
         renderShell();
+        loadGlobalData();
         if (state.sections[0]) await selectSection(state.sections[0].id, { skipHash: true });
         toast('Готово! Можно добавлять задачи.', { tone: 'ok' });
       } catch (error) {
@@ -241,10 +271,13 @@ function renderShell() {
   );
 
   const adminBtn = state.user.role === 'admin'
-    ? h('button', { class: 'btn btn-ghost btn-sm', type: 'button', id: 'adminBtn', onClick: showAdmin }, icon('shield'), 'Администрирование')
+    ? h('button', { class: 'btn btn-ghost btn-sm admin-btn', type: 'button', id: 'adminBtn', onClick: showAdmin },
+        icon('shield'), h('span', { class: 'btn-label' }, 'Администрирование'))
     : null;
 
   els.sectionsNav = h('nav', { class: 'sections' });
+  els.summaryCard = h('div', { class: 'summary-card', hidden: true });
+  els.sectionBreadcrumb = h('div', { class: 'section-breadcrumb', hidden: true });
   els.sectionTitle = h('h1', { class: 'section-title' });
   els.sectionSub = h('div', { class: 'section-sub' });
   els.sectionActions = h('div', { class: 'section-actions' });
@@ -276,7 +309,7 @@ function renderShell() {
 
   els.tasksView.append(
     h('div', { class: 'section-head' },
-      h('div', { class: 'section-head-main' }, els.sectionTitle, els.sectionSub),
+      h('div', { class: 'section-head-main' }, els.sectionBreadcrumb, els.sectionTitle, els.sectionSub),
       els.sectionActions,
     ),
     toolbar,
@@ -318,6 +351,7 @@ function renderShell() {
           h('button', { class: 'icon-btn', type: 'button', title: 'Новый раздел', 'aria-label': 'Новый раздел', onClick: () => openSectionModal(null) }, icon('plus')),
         ),
         els.sectionsNav,
+        els.summaryCard,
       ),
       h('main', { class: 'main' }, els.tasksView, els.adminView),
     ),
@@ -377,35 +411,66 @@ async function loadTasks() {
 /* =========================================================
    Разделы
    ========================================================= */
+function sectionTree() {
+  const visible = new Set(state.sections.map((s) => s.id));
+  const children = new Map();
+  for (const section of state.sections) {
+    const parentId = section.parentId && visible.has(section.parentId) ? section.parentId : null;
+    if (!children.has(parentId)) children.set(parentId, []);
+    children.get(parentId).push(section);
+  }
+  return { children, roots: children.get(null) || [] };
+}
+
 function renderSections() {
   clear(els.sectionsNav);
   if (!state.sections.length) {
     els.sectionsNav.append(h('div', { class: 'sections-empty' }, 'Пока нет разделов'));
+    return;
   }
-  for (const section of state.sections) {
-    const active = section.id === state.currentSectionId;
-    els.sectionsNav.append(
-      h('button', {
-        class: 'section-item' + (active ? ' is-active' : ''),
-        type: 'button',
-        onClick: () => { if (!active) selectSection(section.id); },
-      },
-        h('span', { class: 'section-name', title: section.name }, section.name),
-        section.openCount ? h('span', { class: 'section-count' }, String(section.openCount)) : null,
-      ),
-    );
-  }
+  const { children, roots } = sectionTree();
+  const appendLevel = (items, depth) => {
+    for (const section of items) {
+      const active = section.id === state.currentSectionId;
+      els.sectionsNav.append(
+        h('button', {
+          class: 'section-item' + (active ? ' is-active' : '') + (depth ? ' is-child' : ''),
+          type: 'button',
+          style: depth ? { paddingLeft: `${10 + depth * 14}px` } : null,
+          onClick: () => { if (!active) selectSection(section.id); },
+        },
+          depth ? h('span', { class: 'section-branch' }, '└') : null,
+          h('span', { class: 'section-name', title: section.name }, section.name),
+          section.openCount ? h('span', { class: 'section-count' }, String(section.openCount)) : null,
+        ),
+      );
+      const kids = children.get(section.id) || [];
+      if (kids.length) appendLevel(kids, depth + 1);
+    }
+  };
+  appendLevel(roots, 0);
 }
 
 function renderSectionHeader() {
   const section = currentSection();
   clear(els.sectionActions);
+  els.sectionBreadcrumb.hidden = true;
+  clear(els.sectionBreadcrumb);
   if (!section) {
     els.sectionTitle.textContent = 'Задачник';
     els.sectionSub.textContent = 'Выберите раздел слева или создайте новый';
     return;
   }
   els.sectionTitle.textContent = section.name;
+
+  const parent = section.parentId ? state.sections.find((s) => s.id === section.parentId) : null;
+  if (parent) {
+    els.sectionBreadcrumb.append(
+      h('button', { class: 'breadcrumb-link', type: 'button', onClick: () => selectSection(parent.id) }, parent.name),
+      h('span', { class: 'breadcrumb-sep' }, '/'),
+    );
+    els.sectionBreadcrumb.hidden = false;
+  }
 
   const total = state.tasks.length;
   const open = state.tasks.filter((t) => !t.done).length;
@@ -425,14 +490,25 @@ function renderSectionHeader() {
     els.sectionSub.append(' ', h('span', { class: 'access-note' }, accessNote));
   }
 
-  if (state.user.role === 'admin' || section.createdBy === state.user.id) {
+  if (section.can && section.can.edit) {
     els.sectionActions.append(
       h('button', {
         class: 'btn btn-ghost btn-sm',
         type: 'button',
+        title: 'Создать подраздел',
+        onClick: () => openSectionModal(null, { parentId: section.id }),
+      }, icon('plus'), h('span', { class: 'btn-label' }, 'Подраздел')),
+    );
+  }
+  if (state.user.role === 'admin' || section.createdBy === state.user.id) {
+    els.sectionActions.append(
+      h('button', {
+        class: 'icon-btn',
+        type: 'button',
         title: 'Переименовать раздел',
+        'aria-label': 'Переименовать раздел',
         onClick: () => openSectionModal(section),
-      }, icon('edit'), 'Переименовать'),
+      }, icon('edit')),
     );
   }
   if (state.user.role === 'admin') {
@@ -467,6 +543,10 @@ function renderAddForm() {
     maxlength: '300',
     'aria-label': 'Новая задача',
   });
+  const assignee = h('select', { class: 'input add-assignee', 'aria-label': 'Ответственный' },
+    h('option', { value: '' }, 'Ответственный'),
+    state.directory.map((user) => h('option', { value: user.id }, user.name)),
+  );
   const date = h('input', { class: 'input add-date', type: 'date', 'aria-label': 'Срок исполнения' });
   const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Добавить');
 
@@ -478,23 +558,29 @@ function renderAddForm() {
       if (!title) { input.focus(); return; }
       submit.disabled = true;
       try {
-        const { task } = await api.createTask(section.id, { title, dueDate: date.value || '' });
+        const { task } = await api.createTask(section.id, {
+          title,
+          dueDate: date.value || '',
+          assigneeId: assignee.value || null,
+        });
         state.tasks.push(task);
         state.tasks.sort(sortTasks);
         input.value = '';
         date.value = '';
+        assignee.value = '';
         input.focus();
         renderTasks();
         renderSectionHeader();
         renderFilterChips();
         refreshSectionCounts();
+        refreshSummary();
       } catch (error) {
         handleError(error);
       } finally {
         submit.disabled = false;
       }
     },
-  }, input, date, submit);
+  }, input, assignee, date, submit);
 
   els.addFormWrap.append(form);
   input.addEventListener('keydown', (event) => {
@@ -505,12 +591,125 @@ function renderAddForm() {
 function refreshSectionCounts() {
   const section = currentSection();
   if (!section) return;
-  section.openCount = state.tasks.filter((t) => !t.done).length;
+  section.openCount = state.tasks.filter((t) => !t.done && !t.canceled).length;
   section.taskCount = state.tasks.length;
   renderSections();
 }
 
-function openSectionModal(section) {
+function renderSummary() {
+  const card = els.summaryCard;
+  if (!card) return;
+  if (!state.summary || !state.summary.sections.length) {
+    card.hidden = true;
+    return;
+  }
+  const t = state.summary.totals;
+  clear(card);
+  card.append(
+    h('div', { class: 'summary-head' },
+      h('span', {}, 'Итого по разделам'),
+      h('button', { class: 'summary-link', type: 'button', onClick: openSummaryModal }, 'Сводка'),
+    ),
+    h('div', { class: 'summary-row' },
+      h('span', {}, 'В работе ', h('b', {}, String(t.open))),
+      h('span', {}, 'На приёмке ', h('b', {}, String(t.review))),
+      h('span', {}, 'Архив ', h('b', {}, String(t.archive))),
+    ),
+    (t.overdue || t.hot)
+      ? h('div', { class: 'summary-row is-alert' },
+        t.overdue ? h('span', { class: 'danger-text' }, 'Просрочено ', h('b', {}, String(t.overdue))) : null,
+        t.hot ? h('span', { class: 'warn-text' }, 'Горящих ', h('b', {}, String(t.hot))) : null,
+      )
+      : null,
+  );
+  card.hidden = false;
+}
+
+function openSummaryModal() {
+  if (!state.summary) return;
+  const byId = new Map(state.summary.sections.map((s) => [s.id, s]));
+  const children = new Map();
+  for (const item of state.summary.sections) {
+    const parent = item.parentId && byId.has(item.parentId) ? item.parentId : null;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(item);
+  }
+
+  const rows = [];
+  const walk = (items, depth) => {
+    for (const item of items) {
+      const c = item.counts;
+      rows.push(h('tr', {},
+        h('td', { style: depth ? { paddingLeft: `${14 + depth * 16}px` } : null }, item.name),
+        h('td', {}, String(c.total)),
+        h('td', {}, String(c.open)),
+        h('td', {}, String(c.review)),
+        h('td', {}, String(c.archive)),
+        h('td', { class: c.overdue ? 'danger-cell' : '' }, String(c.overdue)),
+        h('td', { class: c.hot ? 'warn-cell' : '' }, String(c.hot)),
+      ));
+      walk(children.get(item.id) || [], depth + 1);
+    }
+  };
+  walk(children.get(null) || [], 0);
+
+  const t = state.summary.totals;
+  const table = h('table', { class: 'table summary-table' },
+    h('thead', {}, h('tr', {},
+      h('th', {}, 'Раздел'),
+      h('th', {}, 'Всего'),
+      h('th', {}, 'В работе'),
+      h('th', {}, 'На приёмке'),
+      h('th', {}, 'Архив'),
+      h('th', {}, 'Просрочено'),
+      h('th', {}, 'Горящих'),
+    )),
+    h('tbody', {},
+      rows,
+      h('tr', { class: 'summary-total' },
+        h('td', {}, 'Итого'),
+        h('td', {}, String(t.total)),
+        h('td', {}, String(t.open)),
+        h('td', {}, String(t.review)),
+        h('td', {}, String(t.archive)),
+        h('td', { class: t.overdue ? 'danger-cell' : '' }, String(t.overdue)),
+        h('td', { class: t.hot ? 'warn-cell' : '' }, String(t.hot)),
+      ),
+    ),
+  );
+
+  const content = h('div', {},
+    h('div', { class: 'modal-head' },
+      h('div', { class: 'modal-head-main' },
+        h('h2', { class: 'modal-title' }, 'Итого по всем разделам'),
+        h('div', { class: 'modal-sub' }, 'Архив — задачи с обеими отметками: «выполнено» и «принято». Горящие — срок в ближайшие 2 дня или уже прошёл.'),
+      ),
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Закрыть', onClick: () => close() }, icon('close')),
+    ),
+    h('div', { class: 'modal-body' }, table),
+    h('div', { class: 'modal-foot' },
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn btn-ghost', type: 'button', onClick: () => close() }, 'Закрыть'),
+    ),
+  );
+
+  const { close } = openModal(content, { className: 'modal-summary' });
+}
+
+function sectionOptions() {
+  const { children, roots } = sectionTree();
+  const out = [];
+  const walk = (items, depth) => {
+    for (const section of items) {
+      out.push({ section, depth });
+      walk(children.get(section.id) || [], depth + 1);
+    }
+  };
+  walk(roots, 0);
+  return out;
+}
+
+function openSectionModal(section, { parentId = null } = {}) {
   const isNew = !section;
   const input = h('input', {
     class: 'input',
@@ -520,6 +719,19 @@ function openSectionModal(section) {
     maxlength: '120',
     'data-autofocus': '',
   });
+
+  const parentSelect = isNew
+    ? h('select', { class: 'input' },
+      h('option', { value: '' }, '— Верхний уровень —'),
+      sectionOptions()
+        .filter(({ section: item }) => state.user.role === 'admin' || (item.can && item.can.edit))
+        .map(({ section: item, depth }) => h('option', {
+          value: item.id,
+          selected: item.id === parentId,
+        }, `${'— '.repeat(depth)}${item.name}`)),
+    )
+    : null;
+
   const errorBox = formErrorBox();
   const saveBtn = h('button', { class: 'btn btn-primary', type: 'button', onClick: save }, isNew ? 'Создать раздел' : 'Сохранить');
 
@@ -529,18 +741,23 @@ function openSectionModal(section) {
     saveBtn.disabled = true;
     try {
       if (isNew) {
-        const { section: created } = await api.createSection(name);
+        const { section: created } = await api.createSection({
+          name,
+          parentId: parentSelect && parentSelect.value ? parentSelect.value : null,
+        });
         state.sections.push(created);
         close();
         renderSections();
+        refreshSummary();
         await selectSection(created.id);
-        toast('Раздел создан. Вы получили к нему полный доступ.', { tone: 'ok' });
+        toast(created.parentId ? 'Подраздел создан' : 'Раздел создан. Вы получили к нему полный доступ.', { tone: 'ok' });
       } else {
         const { section: updated } = await api.renameSection(section.id, name);
         Object.assign(section, updated);
         close();
         renderSections();
         renderSectionHeader();
+        refreshSummary();
       }
     } catch (error) {
       showFormError(errorBox, error.message);
@@ -560,7 +777,14 @@ function openSectionModal(section) {
     ),
     h('div', { class: 'modal-body' },
       h('label', { class: 'field' }, h('span', {}, 'Название'), input),
-      isNew ? h('div', { class: 'hint' }, 'Например: «Согласования с проектировщиками», «Задания для цеха», «Закупки». Новый раздел сразу будет доступен вам, а другим пользователям — после настройки прав администратором.') : null,
+      parentSelect
+        ? h('label', { class: 'field', style: { marginTop: '12px' } },
+          h('span', {}, 'Родительский раздел'),
+          parentSelect,
+          h('span', { class: 'hint' }, 'Оставьте пустым для раздела верхнего уровня. Выберите раздел, чтобы создать подраздел.'),
+        )
+        : null,
+      isNew ? h('div', { class: 'hint', style: { marginTop: '10px' } }, 'Например: «Согласования с проектировщиками», «Задания для цеха», «Закупки». Новый раздел сразу доступен вам, другим — после настройки прав администратором.') : null,
       errorBox,
     ),
     h('div', { class: 'modal-foot' },
@@ -574,20 +798,25 @@ function openSectionModal(section) {
 }
 
 async function deleteSection(section) {
+  const childCount = state.sections.filter((s) => s.parentId === section.id).length;
   const ok = await confirmDialog({
     title: 'Удалить раздел?',
-    message: `Раздел «${section.name}» и все задачи в нём будут удалены без возможности восстановления.`,
+    message: childCount
+      ? `Раздел «${section.name}», его подразделы (${childCount}) и все задачи в них будут удалены без возможности восстановления.`
+      : `Раздел «${section.name}» и все задачи в нём будут удалены без возможности восстановления.`,
     confirmText: 'Удалить раздел',
   });
   if (!ok) return;
   try {
-    await api.deleteSection(section.id);
-    state.sections = state.sections.filter((s) => s.id !== section.id);
-    if (state.currentSectionId === section.id) {
+    const result = await api.deleteSection(section.id);
+    const removed = new Set(result && Array.isArray(result.removed) ? result.removed : [section.id]);
+    state.sections = state.sections.filter((s) => !removed.has(s.id));
+    if (removed.has(state.currentSectionId)) {
       state.currentSectionId = null;
       state.tasks = [];
     }
     renderSections();
+    refreshSummary();
     if (state.currentSectionId) {
       renderSectionHeader();
       renderAddForm();
@@ -625,33 +854,71 @@ function renderNoSections() {
 /* =========================================================
    Задачи
    ========================================================= */
+function taskRank(task) {
+  if (task.canceled) return 3;
+  if (task.done && task.accepted) return 2;
+  if (task.done) return 1;
+  return 0;
+}
+
 function sortTasks(a, b) {
-  if (a.done !== b.done) return a.done ? 1 : -1;
+  const ra = taskRank(a);
+  const rb = taskRank(b);
+  if (ra !== rb) return ra - rb;
   const ad = a.dueDate || '9999-12-31';
   const bd = b.dueDate || '9999-12-31';
   if (ad !== bd) return ad < bd ? -1 : 1;
   return a.createdAt < b.createdAt ? 1 : -1;
 }
 
+function recurrenceText(recurrence) {
+  if (!recurrence) return '';
+  const n = recurrence.interval || 1;
+  if (recurrence.freq === 'daily') return n === 1 ? 'ежедневно' : `каждые ${n} дн.`;
+  if (recurrence.freq === 'weekly') return n === 1 ? 'еженедельно' : `каждые ${n} нед.`;
+  return n === 1 ? 'ежемесячно' : `каждые ${n} мес.`;
+}
+
+function isArchived(task) {
+  return Boolean(task.done && task.accepted && !task.canceled);
+}
+
+function isHot(task) {
+  if (!task || task.done || task.canceled || !task.dueDate) return false;
+  const diff = dayDiff(task.dueDate);
+  return diff !== null && diff <= 2;
+}
+
 function taskCounts() {
-  return {
-    all: state.tasks.length,
-    open: state.tasks.filter((t) => !t.done).length,
-    review: state.tasks.filter((t) => t.done && !t.accepted).length,
-    done: state.tasks.filter((t) => t.done).length,
-    overdue: state.tasks.filter(isOverdue).length,
-  };
+  const counts = { all: 0, open: 0, review: 0, hot: 0, archive: 0, canceled: 0 };
+  for (const task of state.tasks) {
+    if (task.canceled) {
+      counts.canceled += 1;
+      continue;
+    }
+    if (isArchived(task)) {
+      counts.archive += 1;
+      continue;
+    }
+    counts.all += 1;
+    if (!task.done) counts.open += 1;
+    else if (!task.accepted) counts.review += 1;
+    if (isHot(task)) counts.hot += 1;
+  }
+  return counts;
 }
 
 function visibleTasks() {
   const query = state.query.trim().toLowerCase();
   return state.tasks.filter((task) => {
-    if (state.filter === 'open' && task.done) return false;
-    if (state.filter === 'done' && !task.done) return false;
-    if (state.filter === 'review' && !(task.done && !task.accepted)) return false;
-    if (state.filter === 'overdue' && !isOverdue(task)) return false;
+    if (state.filter === 'open' && (task.done || task.canceled)) return false;
+    if (state.filter === 'review' && !(task.done && !task.accepted && !task.canceled)) return false;
+    if (state.filter === 'hot' && !isHot(task)) return false;
+    if (state.filter === 'archive' && !isArchived(task)) return false;
+    if (state.filter === 'canceled' && !task.canceled) return false;
+    if (state.filter === 'all' && (task.canceled || isArchived(task))) return false;
     if (query) {
-      const haystack = [task.title, ...(task.comments || []).map((c) => c.text)].join(' ').toLowerCase();
+      const haystack = [task.title, task.assigneeName || '', ...(task.comments || []).map((c) => c.text)].join(' ').toLowerCase();
       if (!haystack.includes(query)) return false;
     }
     return true;
@@ -756,13 +1023,47 @@ function checkButton(field, value, label, onToggle, disabled) {
 
 function taskRow(task, editable) {
   const overdue = isOverdue(task);
+  const hot = isHot(task);
   const last = task.comments && task.comments.length ? task.comments[task.comments.length - 1] : null;
+  const canToggle = editable && !task.canceled;
+  const timestamps = [
+    task.doneAt ? `Выполнено: ${fmtDateTime(task.doneAt)}${task.doneBy ? ' · ' + task.doneBy : ''}` : '',
+    task.acceptedAt ? `Принято: ${fmtDateTime(task.acceptedAt)}${task.acceptedBy ? ' · ' + task.acceptedBy : ''}` : '',
+  ].filter(Boolean).join('\n');
+
+  const meta = [];
+  if (task.canceled) meta.push(h('span', { class: 'badge-canceled' }, icon('xCircle'), 'отменена'));
+  if (hot) meta.push(h('span', { class: 'badge-hot' }, icon('flame'), 'горит'));
+  if (task.dueDate) {
+    meta.push(h('span', { class: 'task-due' + (overdue ? ' is-overdue' : '') + (task.done ? ' is-muted' : '') },
+      icon('calendar'), dueLabel(task.dueDate)));
+  }
+  if (task.assigneeName) {
+    meta.push(h('span', { class: 'task-assignee', title: 'Ответственный: ' + task.assigneeName },
+      h('span', { class: 'avatar avatar-xs', style: colorFor(task.assigneeName) }, initials(task.assigneeName)),
+      h('span', { class: 'task-assignee-name' }, task.assigneeName)));
+  }
+  if (task.comments && task.comments.length) {
+    meta.push(h('span', { class: 'task-comments' }, icon('comment'), String(task.comments.length)));
+  }
+  if (task.recurrence) {
+    meta.push(h('span', { class: 'task-repeat', title: 'Повторяющаяся задача' }, icon('repeat'), recurrenceText(task.recurrence)));
+  }
+  if (task.accepted && task.acceptedBy && !task.canceled) {
+    meta.push(h('span', { class: 'task-accepted-by' }, 'принял ' + task.acceptedBy));
+  }
 
   return h('article', {
-    class: 'task' + (task.done ? ' is-done' : '') + (task.accepted ? ' is-accepted' : ''),
+    class: 'task'
+      + (task.done ? ' is-done' : '')
+      + (task.accepted ? ' is-accepted' : '')
+      + (task.canceled ? ' is-canceled' : '')
+      + (hot ? ' is-hot' : '')
+      + (isArchived(task) ? ' is-archived' : ''),
     dataset: { id: task.id },
     tabindex: '0',
     role: 'button',
+    title: timestamps || null,
     onClick: () => openTaskModal(task),
     onKeydown: (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
@@ -772,22 +1073,12 @@ function taskRow(task, editable) {
     },
   },
     h('div', { class: 'task-checks' },
-      checkButton('done', task.done, 'Выполнено', (btn) => toggleTask(task, 'done', btn), !editable),
-      checkButton('accepted', task.accepted, 'Принято', (btn) => toggleTask(task, 'accepted', btn), !editable),
+      checkButton('done', task.done, 'Выполнено', (btn) => toggleTask(task, 'done', btn), !canToggle),
+      checkButton('accepted', task.accepted, 'Принято', (btn) => toggleTask(task, 'accepted', btn), !canToggle),
     ),
     h('div', { class: 'task-main' },
       h('div', { class: 'task-title' }, task.title),
-      h('div', { class: 'task-meta' },
-        task.dueDate
-          ? h('span', { class: 'task-due' + (overdue ? ' is-overdue' : '') + (task.done ? ' is-muted' : '') },
-              icon('calendar'), dueLabel(task.dueDate))
-          : null,
-        task.createdByName ? h('span', { class: 'task-author' }, task.createdByName) : null,
-        task.comments && task.comments.length
-          ? h('span', { class: 'task-comments' }, icon('comment'), String(task.comments.length))
-          : null,
-        task.accepted && task.acceptedBy ? h('span', { class: 'task-accepted-by' }, 'принял ' + task.acceptedBy) : null,
-      ),
+      meta.length ? h('div', { class: 'task-meta' }, meta) : null,
       last
         ? h('div', { class: 'task-last' },
             h('span', { class: 'task-last-author' }, last.authorName + ':'), ' ' + truncate(last.text, 150))
@@ -798,17 +1089,23 @@ function taskRow(task, editable) {
 }
 
 async function toggleTask(task, field, btn) {
+  if (task.canceled) return;
   const next = !task[field];
   btn.classList.toggle('is-on', next);
   btn.setAttribute('aria-pressed', next ? 'true' : 'false');
   btn.disabled = true;
   try {
-    const { task: updated } = await api.updateTask(task.id, { [field]: next });
+    const { task: updated, spawned } = await api.updateTask(task.id, { [field]: next });
     Object.assign(task, updated);
+    if (spawned) {
+      state.tasks.push(spawned);
+      toast('Создана следующая задача серии', { tone: 'info', duration: 3200 });
+    }
     renderTasks();
     renderSectionHeader();
     renderFilterChips();
     refreshSectionCounts();
+    refreshSummary();
   } catch (error) {
     btn.classList.toggle('is-on', !next);
     btn.setAttribute('aria-pressed', next ? 'false' : 'true');
@@ -824,19 +1121,49 @@ async function toggleTask(task, field, btn) {
 function openTaskModal(task) {
   const section = currentSection();
   const canEdit = Boolean(section && section.can.edit);
-  const canDeleteComment = (comment) => canEdit || state.user.role === 'admin' || comment.authorId === state.user.id;
+  const isAdmin = state.user.role === 'admin';
+  const canDeleteComment = (comment) => canEdit || isAdmin || comment.authorId === state.user.id;
+  const locked = Boolean(task.canceled);
 
   const titleInput = h('input', {
     class: 'title-input',
     type: 'text',
     value: task.title,
     maxlength: '300',
-    disabled: !canEdit,
+    disabled: !canEdit || locked,
     'aria-label': 'Название задачи',
   });
-  const dueInput = h('input', { class: 'input', type: 'date', value: task.dueDate || '', disabled: !canEdit });
-  const doneCheck = h('input', { type: 'checkbox', checked: task.done, disabled: !canEdit });
-  const acceptedCheck = h('input', { type: 'checkbox', checked: task.accepted, disabled: !canEdit });
+  const dueInput = h('input', { class: 'input', type: 'date', value: task.dueDate || '', disabled: !canEdit || locked });
+  const doneCheck = h('input', { type: 'checkbox', checked: Boolean(task.done), disabled: !canEdit || locked });
+  const acceptedCheck = h('input', { type: 'checkbox', checked: Boolean(task.accepted), disabled: !canEdit || locked });
+
+  const assigneeSelect = h('select', { class: 'input', disabled: !canEdit || locked, 'aria-label': 'Ответственный' },
+    h('option', { value: '' }, '— не назначен —'),
+    state.directory.map((user) => h('option', { value: user.id, selected: user.id === task.assigneeId }, user.name)),
+  );
+
+  const repeatSelect = h('select', { class: 'input', disabled: !canEdit || locked, 'aria-label': 'Повторение' },
+    h('option', { value: '', selected: !task.recurrence }, 'Не повторять'),
+    h('option', { value: 'daily', selected: Boolean(task.recurrence && task.recurrence.freq === 'daily') }, 'Каждый день'),
+    h('option', { value: 'weekly', selected: Boolean(task.recurrence && task.recurrence.freq === 'weekly') }, 'Каждую неделю'),
+    h('option', { value: 'monthly', selected: Boolean(task.recurrence && task.recurrence.freq === 'monthly') }, 'Каждый месяц'),
+  );
+  const intervalInput = h('input', {
+    class: 'input',
+    type: 'number',
+    min: '1',
+    max: '12',
+    value: String((task.recurrence && task.recurrence.interval) || 1),
+    disabled: !canEdit || locked,
+    'aria-label': 'Интервал повторения',
+  });
+  const intervalField = h('label', { class: 'field repeat-interval', hidden: !task.recurrence },
+    h('span', {}, 'Каждые'),
+    intervalInput,
+  );
+  repeatSelect.addEventListener('change', () => {
+    intervalField.hidden = !repeatSelect.value;
+  });
 
   const commentsBox = h('div', { class: 'comments' });
   const commentsCount = h('span', { class: 'count' }, String(task.comments ? task.comments.length : 0));
@@ -921,6 +1248,15 @@ function openTaskModal(task) {
     }
   });
 
+  function afterChange(spawned) {
+    if (spawned) state.tasks.push(spawned);
+    renderTasks();
+    renderSectionHeader();
+    renderFilterChips();
+    refreshSectionCounts();
+    refreshSummary();
+  }
+
   const saveBtn = h('button', { class: 'btn btn-primary', type: 'button', onClick: save }, 'Сохранить');
 
   async function save() {
@@ -934,11 +1270,18 @@ function openTaskModal(task) {
     }
     saveBtn.disabled = true;
     try {
-      const payload = { title, dueDate: dueInput.value || '' };
-      const { task: updated } = await api.updateTask(task.id, payload);
+      const recurrence = repeatSelect.value
+        ? { freq: repeatSelect.value, interval: Math.max(1, Math.min(12, Number(intervalInput.value) || 1)) }
+        : null;
+      const payload = {
+        title,
+        dueDate: dueInput.value || '',
+        assigneeId: assigneeSelect.value || null,
+        recurrence,
+      };
+      const { task: updated, spawned } = await api.updateTask(task.id, payload);
       Object.assign(task, updated);
-      renderTasks();
-      renderSectionHeader();
+      afterChange(spawned);
       close();
       toast('Задача сохранена', { tone: 'ok', duration: 2000 });
     } catch (error) {
@@ -949,53 +1292,75 @@ function openTaskModal(task) {
     }
   }
 
-  doneCheck.addEventListener('change', async () => {
+  async function patchFlag(field, checkbox) {
+    if (locked) return;
     try {
-      const { task: updated } = await api.updateTask(task.id, { done: doneCheck.checked });
+      const { task: updated, spawned } = await api.updateTask(task.id, { [field]: checkbox.checked });
       Object.assign(task, updated);
-      renderTasks();
-      renderSectionHeader();
-      renderFilterChips();
-      refreshSectionCounts();
+      afterChange(spawned);
+      if (spawned) toast('Создана следующая задача серии', { tone: 'info', duration: 3200 });
     } catch (error) {
-      doneCheck.checked = task.done;
+      checkbox.checked = Boolean(task[field]);
       handleError(error);
     }
-  });
+  }
 
-  acceptedCheck.addEventListener('change', async () => {
+  doneCheck.addEventListener('change', () => patchFlag('done', doneCheck));
+  acceptedCheck.addEventListener('change', () => patchFlag('accepted', acceptedCheck));
+
+  async function cancelTask() {
+    const ok = await confirmDialog({
+      title: 'Отменить задачу?',
+      message: `«${task.title}» перейдёт в «Отменённые». Данные сохранятся — задачу можно вернуть в работу.`,
+      confirmText: 'Отменить задачу',
+      cancelText: 'Не отменять',
+    });
+    if (!ok) return;
     try {
-      const { task: updated } = await api.updateTask(task.id, { accepted: acceptedCheck.checked });
+      const { task: updated } = await api.updateTask(task.id, { canceled: true });
       Object.assign(task, updated);
-      renderTasks();
-      renderSectionHeader();
-      renderFilterChips();
-      refreshSectionCounts();
+      close();
+      afterChange(null);
+      toast('Задача отменена', { tone: 'ok' });
     } catch (error) {
-      acceptedCheck.checked = task.accepted;
       handleError(error);
     }
-  });
+  }
 
-  const deleteBtn = canEdit
+  async function restoreTask() {
+    try {
+      const { task: updated, spawned } = await api.updateTask(task.id, { canceled: false });
+      Object.assign(task, updated);
+      close();
+      afterChange(spawned);
+      toast('Задача возвращена в работу', { tone: 'ok' });
+    } catch (error) {
+      handleError(error);
+    }
+  }
+
+  const cancelBtn = canEdit
+    ? (locked
+      ? h('button', { class: 'btn btn-ghost', type: 'button', onClick: restoreTask }, icon('repeat'), 'Вернуть в работу')
+      : h('button', { class: 'btn btn-danger', type: 'button', onClick: cancelTask }, icon('xCircle'), h('span', { class: 'btn-label' }, 'Отменить')))
+    : null;
+
+  const deleteBtn = isAdmin
     ? h('button', {
         class: 'btn btn-danger',
         type: 'button',
         onClick: async () => {
           const ok = await confirmDialog({
             title: 'Удалить задачу?',
-            message: `«${task.title}» будет удалена вместе с комментариями.`,
-            confirmText: 'Удалить',
+            message: `«${task.title}» будет удалена вместе с комментариями. Для обычной работы используйте «Отменить».`,
+            confirmText: 'Удалить навсегда',
           });
           if (!ok) return;
           try {
             await api.deleteTask(task.id);
             state.tasks = state.tasks.filter((t) => t.id !== task.id);
             close();
-            renderTasks();
-            renderSectionHeader();
-            renderFilterChips();
-            refreshSectionCounts();
+            afterChange(null);
             toast('Задача удалена', { tone: 'ok' });
           } catch (error) {
             handleError(error);
@@ -1014,13 +1379,19 @@ function openTaskModal(task) {
     ),
     h('div', { class: 'modal-body task-modal-body' },
       h('div', { class: 'task-fields' },
+        locked
+          ? h('div', { class: 'callout', dataset: { tone: 'error' } }, icon('xCircle'),
+              h('div', {}, `Задача отменена ${task.canceledAt ? fmtDateTime(task.canceledAt) : ''}${task.canceledBy ? ' · ' + task.canceledBy : ''}.`))
+          : null,
         h('div', { class: 'checks-panel' },
           h('label', { class: 'big-check' },
             doneCheck,
             h('span', { class: 'big-check-box' }, icon('check')),
             h('span', { class: 'big-check-text' },
               h('span', { class: 'big-check-title' }, 'Выполнено'),
-              task.done && task.doneBy ? h('span', { class: 'big-check-sub' }, `${task.doneBy} · ${relTime(task.doneAt)}`) : null,
+              task.done && task.doneAt
+                ? h('span', { class: 'big-check-sub' }, `${task.doneBy || ''} · ${fmtDateTime(task.doneAt)}`)
+                : null,
             ),
           ),
           h('label', { class: 'big-check big-check-accept' },
@@ -1028,11 +1399,21 @@ function openTaskModal(task) {
             h('span', { class: 'big-check-box' }, icon('check')),
             h('span', { class: 'big-check-text' },
               h('span', { class: 'big-check-title' }, 'Принято'),
-              task.accepted && task.acceptedBy ? h('span', { class: 'big-check-sub' }, `${task.acceptedBy} · ${relTime(task.acceptedAt)}`) : null,
+              task.accepted && task.acceptedAt
+                ? h('span', { class: 'big-check-sub' }, `${task.acceptedBy || ''} · ${fmtDateTime(task.acceptedAt)}`)
+                : null,
             ),
           ),
         ),
         h('label', { class: 'field' }, h('span', {}, 'Дата исполнения'), dueInput),
+        h('label', { class: 'field' }, h('span', {}, 'Ответственный'), assigneeSelect),
+        h('div', { class: 'form-row' },
+          h('label', { class: 'field' }, h('span', {}, 'Повторение'), repeatSelect),
+          intervalField,
+        ),
+        task.spawnedNext
+          ? h('div', { class: 'hint' }, 'Следующая задача серии уже создана — она появилась в списке с новым сроком.')
+          : null,
         h('div', { class: 'form-error', hidden: true }),
       ),
       h('div', { class: 'comments-panel' },
@@ -1043,9 +1424,10 @@ function openTaskModal(task) {
     ),
     h('div', { class: 'modal-foot' },
       deleteBtn,
+      cancelBtn,
       h('span', { class: 'spacer' }),
       h('button', { class: 'btn btn-ghost', type: 'button', onClick: () => close() }, 'Закрыть'),
-      canEdit ? saveBtn : null,
+      canEdit && !locked ? saveBtn : null,
     ),
   );
 

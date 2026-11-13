@@ -45,9 +45,11 @@ export const api = {
   logout: () => request('/api/logout', { method: 'POST' }),
 
   sections: () => request('/api/sections'),
-  createSection: (name) => request('/api/sections', { method: 'POST', body: { name } }),
+  createSection: (body) => request('/api/sections', { method: 'POST', body }),
   renameSection: (id, name) => request(`/api/sections/${id}`, { method: 'PATCH', body: { name } }),
   deleteSection: (id) => request(`/api/sections/${id}`, { method: 'DELETE' }),
+  summary: () => request('/api/summary'),
+  directory: () => request('/api/users/directory'),
 
   tasks: (sectionId) => request(`/api/sections/${sectionId}/tasks`),
   createTask: (sectionId, body) => request(`/api/sections/${sectionId}/tasks`, { method: 'POST', body }),

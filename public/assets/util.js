@@ -50,6 +50,9 @@ const ICON_PATHS = {
   lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   dots: '<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>',
+  repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  flame: '<path d="M12 22c4 0 7-2.7 7-6.5 0-2.5-1.4-4.6-3-6.5-.7 1.2-1.5 2-2.6 2.6.3-2.6-.9-5.3-3.4-7.1.2 3-1.2 4.5-2.7 6.2C6.2 12 5 13.7 5 15.5 5 19.3 8 22 12 22Z"/>',
+  xCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
 };
@@ -128,7 +131,7 @@ export function dueLabel(dateStr) {
 }
 
 export function isOverdue(task) {
-  if (!task || !task.dueDate || task.done) return false;
+  if (!task || !task.dueDate || task.done || task.canceled) return false;
   const diff = dayDiff(task.dueDate);
   return diff !== null && diff < 0;
 }

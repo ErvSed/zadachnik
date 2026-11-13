@@ -2,7 +2,8 @@
 
 /**
  * Дымовой тест API: поднимает сервер на временной базе и проверяет
- * основные сценарии — первый запуск, разделы, задачи, права, комментарии.
+ * основные сценарии — первый запуск, разделы и подразделы, задачи,
+ * отметки, повторения, отмену, права, сводку и комментарии.
  *
  * Запуск: node test/smoke.js
  */
@@ -92,34 +93,79 @@ async function main() {
     });
     check('администратор создан', setup.status === 200 && setup.json.user.role === 'admin');
     check('создан стартовый раздел', setup.json.sections.length === 1);
+    const adminId = setup.json.user.id;
+    const sectionA = setup.json.sections[0].id;
 
-    const sectionId = setup.json.sections[0].id;
-
-    console.log('\nРазделы и задачи');
-    const createdSection = await admin('/api/sections', { method: 'POST', body: { name: 'Задания для цеха' } });
+    console.log('\nРазделы и подразделы');
+    const createdSection = await admin('/api/sections', { method: 'POST', body: { name: 'Цех' } });
     check('раздел создан', createdSection.status === 201);
-    const shopId = createdSection.json.section.id;
+    const sectionB = createdSection.json.section.id;
 
-    const task1 = await admin(`/api/sections/${sectionId}/tasks`, {
+    const createdSub = await admin('/api/sections', { method: 'POST', body: { name: 'Смета', parentId: sectionB } });
+    check('подраздел создан', createdSub.status === 201 && createdSub.json.section.parentId === sectionB);
+    const subB = createdSub.json.section.id;
+
+    const listSections = await admin('/api/sections');
+    check('подраздел в списке разделов', listSections.json.sections.some((s) => s.id === subB && s.parentId === sectionB));
+
+    console.log('\nЗадачи, отметки, ответственный');
+    const t1 = await admin(`/api/sections/${sectionA}/tasks`, {
       method: 'POST',
       body: { title: 'Согласовать утеплитель', dueDate: '2026-11-20' },
     });
-    check('задача создана', task1.status === 201 && task1.json.task.dueDate === '2026-11-20');
+    check('задача создана', t1.status === 201 && t1.json.task.dueDate === '2026-11-20');
+    const taskA = t1.json.task;
 
-    const task2 = await admin(`/api/sections/${shopId}/tasks`, { method: 'POST', body: { title: 'Изготовить каркас' } });
-    check('задача без срока создана', task2.status === 201 && task2.json.task.dueDate === '');
+    const t2 = await admin(`/api/sections/${sectionB}/tasks`, { method: 'POST', body: { title: 'Изготовить каркас' } });
+    check('задача без срока создана', t2.status === 201 && t2.json.task.dueDate === '');
+    const taskB = t2.json.task;
 
-    const patched = await admin(`/api/tasks/${task1.json.task.id}`, { method: 'PATCH', body: { done: true } });
+    const t3 = await admin(`/api/sections/${subB}/tasks`, {
+      method: 'POST',
+      body: {
+        title: 'Еженедельный обход',
+        dueDate: '2026-11-20',
+        assigneeId: adminId,
+        recurrence: { freq: 'weekly', interval: 1 },
+      },
+    });
+    check('ответственный сохранён', t3.json.task.assigneeId === adminId && t3.json.task.assigneeName === 'Администратор');
+    check('повторение сохранено', t3.json.task.recurrence && t3.json.task.recurrence.freq === 'weekly');
+    const taskC = t3.json.task;
+
+    const patched = await admin(`/api/tasks/${taskA.id}`, { method: 'PATCH', body: { done: true } });
     check('отметка «Выполнено» сохраняется', patched.json.task.done === true && patched.json.task.doneBy === 'Администратор');
 
-    const accepted = await admin(`/api/tasks/${task1.json.task.id}`, { method: 'PATCH', body: { accepted: true } });
+    const accepted = await admin(`/api/tasks/${taskA.id}`, { method: 'PATCH', body: { accepted: true } });
     check('отметка «Принято» сохраняется', accepted.json.task.accepted === true);
 
-    const comment = await admin(`/api/tasks/${task1.json.task.id}/comments`, { method: 'POST', body: { text: 'Передано в работу' } });
+    const comment = await admin(`/api/tasks/${taskA.id}/comments`, { method: 'POST', body: { text: 'Передано в работу' } });
     check('комментарий добавлен', comment.status === 201 && comment.json.task.comments.length === 1);
 
-    const list = await admin(`/api/sections/${sectionId}/tasks`);
-    check('список задач отдаётся', list.json.tasks.length === 1);
+    console.log('\nПовторяющиеся задачи');
+    const weeklyDone = await admin(`/api/tasks/${taskC.id}`, { method: 'PATCH', body: { done: true } });
+    check('первая отметка не создаёт повтор', !weeklyDone.json.spawned);
+    const weeklyAccepted = await admin(`/api/tasks/${taskC.id}`, { method: 'PATCH', body: { accepted: true } });
+    check('после «выполнено + принято» создаётся следующая', Boolean(weeklyAccepted.json.spawned));
+    check('следующая задача с новым сроком', weeklyAccepted.json.spawned.dueDate === '2026-11-27');
+    check('серия сохраняется', weeklyAccepted.json.spawned.seriesId === weeklyAccepted.json.task.seriesId);
+
+    console.log('\nОтмена задачи');
+    const t4 = await admin(`/api/sections/${sectionB}/tasks`, { method: 'POST', body: { title: 'Отменить закупку' } });
+    const canceled = await admin(`/api/tasks/${t4.json.task.id}`, { method: 'PATCH', body: { canceled: true } });
+    check('задача отменена', canceled.json.task.canceled === true && canceled.json.task.canceledAt);
+    const restored = await admin(`/api/tasks/${t4.json.task.id}`, { method: 'PATCH', body: { canceled: false } });
+    check('задачу можно вернуть', restored.json.task.canceled === false);
+
+    console.log('\nСводка');
+    const summary = await admin('/api/summary');
+    check('сводка отдаётся', summary.status === 200 && summary.json.totals.total > 0);
+    check('в сводке есть архив', summary.json.totals.archive >= 1);
+    check('в сводке есть строки разделов', summary.json.sections.length >= 3);
+
+    console.log('\nСправочник пользователей');
+    const directory = await admin('/api/users/directory');
+    check('справочник доступен', directory.status === 200 && directory.json.users.some((u) => u.id === adminId));
 
     console.log('\nПользователи и права');
     const createdUser = await admin('/api/users', {
@@ -133,8 +179,8 @@ async function main() {
       method: 'PUT',
       body: {
         permissions: [
-          { sectionId, read: true, create: false, edit: false },
-          { sectionId: shopId, read: true, create: true, edit: true },
+          { sectionId: sectionA, read: true, create: false, edit: false },
+          { sectionId: subB, read: true, create: true, edit: true },
         ],
       },
     });
@@ -146,28 +192,35 @@ async function main() {
     const petrov = makeClient();
     const login = await petrov('/api/login', { method: 'POST', body: { login: 'petrov', password: 'petrov123' } });
     check('вход пользователя', login.status === 200 && login.json.user.login === 'petrov');
-    check('пользователь видит 2 раздела', login.json.sections.length === 2);
+    check('пользователь видит только доступные разделы', login.json.sections.length === 2);
+    check('чужая ветка не видна', !login.json.sections.some((s) => s.id === sectionB));
 
-    const forbiddenEdit = await petrov(`/api/tasks/${task1.json.task.id}`, { method: 'PATCH', body: { title: 'Взлом' } });
+    const forbiddenEdit = await petrov(`/api/tasks/${taskA.id}`, { method: 'PATCH', body: { title: 'Взлом' } });
     check('чтение без правки запрещено (403)', forbiddenEdit.status === 403);
 
-    const forbiddenCreate = await petrov(`/api/sections/${sectionId}/tasks`, { method: 'POST', body: { title: 'Нельзя' } });
+    const forbiddenCreate = await petrov(`/api/sections/${sectionA}/tasks`, { method: 'POST', body: { title: 'Нельзя' } });
     check('создание без права запрещено (403)', forbiddenCreate.status === 403);
 
-    const allowedCreate = await petrov(`/api/sections/${shopId}/tasks`, { method: 'POST', body: { title: 'Задача от Петрова' } });
-    check('создание с правом разрешено', allowedCreate.status === 201);
+    const allowedCreate = await petrov(`/api/sections/${subB}/tasks`, { method: 'POST', body: { title: 'Задача от Петрова' } });
+    check('создание в подразделе с правом разрешено', allowedCreate.status === 201);
 
-    const allowedEdit = await petrov(`/api/tasks/${task2.json.task.id}`, { method: 'PATCH', body: { done: true } });
-    check('правка с правом разрешена', allowedEdit.status === 200);
+    const forbiddenSub = await petrov('/api/sections', { method: 'POST', body: { name: 'Вложенный', parentId: sectionB } });
+    check('подраздел без прав на родителя запрещён', forbiddenSub.status === 403);
 
     const usersForbidden = await petrov('/api/users');
     check('пользователь не видит админку', usersForbidden.status === 403);
 
-    const hiddenSection = await petrov(`/api/sections/${shopId}/tasks`);
-    check('свой раздел читается', hiddenSection.status === 200);
+    const summaryForPetrov = await petrov('/api/summary');
+    check('сводка пользователя только по его разделам', summaryForPetrov.status === 200 && summaryForPetrov.json.sections.length === 2);
+
+    console.log('\nУдаление раздела с подразделами');
+    const removed = await admin(`/api/sections/${sectionB}`, { method: 'DELETE' });
+    check('ветка удалена', removed.status === 200 && removed.json.removed.includes(subB));
+    const goneTasks = await admin(`/api/sections/${subB}/tasks`);
+    check('задачи подраздела удалены', goneTasks.status === 404);
 
     console.log('\nБезопасность');
-    const csrf = await admin(`/api/sections/${sectionId}/tasks`, {
+    const csrf = await admin(`/api/sections/${sectionA}/tasks`, {
       method: 'POST',
       body: { title: 'Без заголовка' },
       headers: { 'X-Requested-With': '' },
@@ -179,14 +232,16 @@ async function main() {
 
     const disabled = await admin(`/api/users/${userId}`, { method: 'PATCH', body: { disabled: true } });
     check('пользователь отключён', disabled.status === 200);
-    const blocked = await petrov(`/api/sections/${shopId}/tasks`);
+    const blocked = await petrov(`/api/sections/${sectionA}/tasks`);
     check('отключённый пользователь теряет сессию', blocked.status === 401);
 
     const deletion = await admin(`/api/users/${userId}`, { method: 'DELETE' });
     check('пользователь удалён', deletion.status === 200);
 
-    const restartDb = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'db.json'), 'utf8'));
-    check('база записана на диск', restartDb.tasks.length === 3 && restartDb.users.length === 1);
+    const db = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'db.json'), 'utf8'));
+    check('база записана на диск', db.users.length === 1 && db.tasks.length === 1);
+    check('в базе новая схема', db.schema === 2);
+    check('все задачи мигрированы', db.tasks.every((t) => typeof t.canceled === 'boolean' && 'recurrence' in t));
   } finally {
     server.kill();
     await new Promise((r) => setTimeout(r, 300));
